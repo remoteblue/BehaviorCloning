@@ -10,38 +10,101 @@ from matplotlib import pyplot as plt
 import sklearn
 import pdb #debugger. Please use pdb.set_trace() to insert bp
 
-# fileDir specifys different data source. During training, saving data to the sample data increases the total volumne on top of exiting data set
-fileDir = './SampleData/data/driving_log.csv'
-imgDir = './SampleData/data/IMG/'
-#fileDir = './SimS/driving_log.csv'
-#imgDir = './SimS/IMG/'
 
 
 lines = []
 samples = []
 # Note: ./ means the subfolder; ../ means other
 
-with open(fileDir) as csvfile:
-  reader = csv.reader(csvfile)
-  for line in reader:
-    if float(line[3])==0:
-        continue
-    lines.append(line)
-    samples.append(line)
+dataSets = [
+           './SampleData/data/driving_log.csv',
+           './SampleData/TurnBeforeBridge/driving_log.csv',
+           './SampleData/FirstBigTurn/driving_log.csv',
+           './SampleData/Bridge/driving_log.csv',
+           './SampleData/TurnAfterBridge/driving_log.csv'
+]
+
+# fileDir specifys different data source. During training, saving data to the sample data increases the total volumne on top of exiting data set
+fileDir = './SampleData/data/driving_log.csv'
+
+#fileDir = './SimS/driving_log.csv'
+#imgDir = './SimS/IMG/'
+
+for fileDir in dataSets:
+    with open(fileDir) as csvfile:
+         reader = csv.reader(csvfile)
+         for line in reader:
+             straightData = np.random.uniform(low=0.0,high=1.0,size=None)
+             #Pass certain percentage of 0 angle data so as to support driving in the straight road
+             if float(line[3])==0 and straightData <0.8 :
+                continue
+             lines.append(line)
+             samples.append(line)
+
+
 print("samples.shape = ", len(samples))
 
-"""
-# fileDir2 two training recording together. IMG folder need to be combined
-line=[]
-with open (fileDir2) as csvfile:
-  reader = csv.reader(csvfile)
-  for line in reader:
-    lines.append(line)
-    samples.append(line)
-"""
 
 from sklearn.model_selection import train_test_split
 train_samples, validation_samples = train_test_split(samples, test_size=0.2)
+
+
+# code from Vivek Yadav
+# this is necessary because dropout/chang of hypoparameter alone can't address the overfitting problem
+def augment_brightness_camera_images(image):
+    #outimageHSV = np.uint8(image)
+    image1 = cv2.cvtColor(image,cv2.COLOR_RGB2HSV)
+    image1 = np.array(image1, dtype = np.float64)
+    random_bright = .5+np.random.uniform()
+    image1[:,:,2] = image1[:,:,2]*random_bright
+    image1[:,:,2][image1[:,:,2]>255]  = 255
+    image1 = np.array(image1, dtype = np.uint8)
+    image1 = cv2.cvtColor(image1,cv2.COLOR_HSV2RGB)
+    return image1
+
+def transform_image(img,ang_range,shear_range,trans_range):
+    '''
+    This function transforms images to generate new images.
+    The function takes in following arguments,
+    1- Image
+    2- ang_range: Range of angles for rotation
+    3- shear_range: Range of values to apply affine transform to
+    4- trans_range: Range of values to apply translations over. 
+    
+    A Random uniform distribution is used to generate different parameters for transformation
+    
+    '''
+    # Rotation
+
+    ang_rot = np.random.uniform(ang_range)-ang_range/2
+    rows,cols,ch = img.shape    
+    Rot_M = cv2.getRotationMatrix2D((cols/2,rows/2),ang_rot,1)
+
+    # Translation
+    tr_x = trans_range*np.random.uniform()-trans_range/2
+    tr_y = trans_range*np.random.uniform()-trans_range/2
+    Trans_M = np.float32([[1,0,tr_x],[0,1,tr_y]])
+
+    # Shear
+    pts1 = np.float32([[5,5],[20,5],[5,20]])
+
+    pt1 = 5+shear_range*np.random.uniform()-shear_range/2
+    pt2 = 20+shear_range*np.random.uniform()-shear_range/2
+    
+    # Brightness 
+    
+
+    pts2 = np.float32([[pt1,5],[pt2,pt1],[5,pt2]])
+
+    shear_M = cv2.getAffineTransform(pts1,pts2)
+        
+    img = cv2.warpAffine(img,Rot_M,(cols,rows))
+    img = cv2.warpAffine(img,Trans_M,(cols,rows))
+    img = cv2.warpAffine(img,shear_M,(cols,rows))
+    
+    #img = augment_brightness_camera_images(img) ### brightness not helping as much.. removing this from augmentation
+    
+    return img
 
 #Use generator to pull pieces of the data and process them on the fly only when necessary 
 #Otherwise, GPU may complain 'out of memory'.
@@ -58,7 +121,9 @@ def generator(samples, batch_size):
                 for i in range(3):
                     source_path = line[i]
                     filename = source_path.split('/')[-1]
-                    current_path = imgDir+filename
+                    foldername = source_path.split('/')[-4]+'/'+source_path.split('/')[-3]
+                    current_path = './'+foldername+'/IMG/'+filename
+                    #pdb.set_trace()
                     #current_path = imgDir+filename
                     image = cv2.imread(current_path)
                     #cv2.imread returns BGR format while drive.py feeds RBG format.
@@ -69,16 +134,25 @@ def generator(samples, batch_size):
                 measurements.append(measurement)
                 measurements.append(measurement+correction)
                 measurements.append(measurement-correction)
+                #pdb.set_trace()
                 
 
-            #Augment data by flipping images
+            #Augment data by flipping images then rotation
             augmented_images, augmented_measurements = [],[]
+            ind=-1 # simple index ctr
+            n=3 # number of augmented images to generate
+
             for image, measurement in zip(images,measurements):
                 augmented_images.append(image)
                 augmented_measurements.append(measurement)
                 augmented_images.append(cv2.flip(image,1))
                 augmented_measurements.append(measurement*-1.0)
-
+                #Augment data by rotating images
+                ind=ind+1
+                for i in range(n): 
+                    augmented_images.append(transform_image(image,15,8,3)) # generate augmented images
+                    augmented_measurements.append(measurement) # maintain y labels for augmented images
+            #Format conversion
             X_train = np.array(augmented_images)
             y_train = np.array(augmented_measurements)
             yield sklearn.utils.shuffle(X_train, y_train)
@@ -102,13 +176,13 @@ train_generator = generator(train_samples, batch_size=32)
 validation_generator = generator(validation_samples, batch_size=32)
 
 # Show training set histogram
-
+"""
 _generator = generator(train_samples,batch_size = 32)
 X_train,y_train=next(_generator)
 print(y_train)
 show_histogram(y_train)
 exit(0)
-
+"""
 
 from keras.models import Sequential
 from keras.layers import Flatten, Dense, Lambda,Cropping2D, Dropout
